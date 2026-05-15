@@ -7,7 +7,6 @@ in both **domain fronting** (with custom SNI) and **domainless fronting**
 (empty SNI) configurations. It helps you quickly identify which IPs can
 be used for TLS-based circumvention or tunneling.
 
-## 
 ## Quickstart
 
 ```bash
@@ -16,10 +15,24 @@ git clone https://github.com/FarazFe/cdn-ip-checker.git
 cd cdn-ip-scanner
 ```
 
-#### Create a list of IPs (one per line):
+#### Create or generate a list of IPs (one per line):
+You can create `ips.txt` manually:
+
 ```bash
 echo "23.209.22.214" > ips.txt
 ```
+Or generate it from CDN CIDR ranges:
+
+``` bash
+python generate_ips.py -f akamai_ranges.txt -m fast
+```
+This creates ips.txt, which you can pass to the checker:
+
+``` bash
+python cdn_ip_checker.py -f ips.txt
+```
+For more details, see Preparing IPs from [CDN CIDR Ranges](#preparing-ips-from-cdn-cidr-ranges)
+
 
 #### Run a domainless scan (empty SNI) - most common use case:
 ```bash
@@ -30,13 +43,87 @@ Clean IPs are saved to clean_domainless.txt and printed on screen
 
 #### Full fronting test with an SNI:
 ``` bash
-python ip_checker.py -f ips.txt --sni speedtest.net
+python ip_checker.py -f ips.txt --sni a248.e.akamai.net
 ```
 Adjust concurrency and timeout as needed:
 
 ```bash
 python ip_checker.py -f ips.txt -w 50 -t 3
 ```
+---
+
+## Preparing IPs from CDN CIDR Ranges
+
+Before running the checker, you need a list of actual IP addresses.
+
+Many CDN providers publish or announce their edge IP ranges in **CIDR notation**.
+For example, an Akamai range may look like this:
+
+```text
+104.64.0.0/10
+23.32.0.0/11
+23.192.0.0/11
+```
+
+These are not individual IPs. They are IP ranges. To use them with this tool,
+you first need to generate real IP addresses from those CIDR ranges.
+
+This project includes a sample Akamai CIDR range file that you can use for
+testing. You can also create your own file and put one CIDR range per line:
+
+``` text
+104.64.0.0/10
+23.32.0.0/11
+23.192.0.0/11
+23.0.0.0/12
+```
+
+For example, save the ranges in a file named:
+```text
+akamai_ranges.txt
+```
+
+### Fast mode: generate a sample of IPs
+
+For large CDN ranges, generating every single IP can create a very large file.
+The recommended way is to generate a random sample first.
+``` bash
+python generate_ips.py -f akamai_ranges.txt -m fast
+```
+By default, this saves the generated IPs to:
+``` text
+ips.txt
+```
+
+You can also choose how many IPs to sample from each range:
+``` bash
+python generate_ips.py -f akamai_ranges.txt -m fast -s 1000
+```
+
+This generates 1000 random IPs from each CIDR range and saves them to:
+``` text
+ips.txt
+```
+
+### Full mode: generate all IPs
+
+If you want to generate every IP from every CIDR range, use full mode:
+``` bash
+python generate_ips.py -f akamai_ranges.txt -m full
+``` 
+This also saves the result to:
+```text
+ips.txt
+```
+
+Be careful with full mode. CDN ranges can be very large and may generate
+millions of IPs.
+
+The basic workflow is:
+```text
+CDN CIDR ranges -> generate ips.txt -> run cdn_ip_checker.py
+``` 
+---
 
 ## Table of Contents
 
