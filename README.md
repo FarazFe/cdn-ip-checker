@@ -1,5 +1,7 @@
 # CDN Edge IP Cleanliness Checker
 
+🌐 Languages: [English](README.md) | [فارسی](README_fa.md)
+
 A lightweight, multi-threaded Python scanner for testing CDN edge IPs
 in both **domain fronting** (with custom SNI) and **domainless fronting**
 (empty SNI) configurations. It helps you quickly identify which IPs can
@@ -137,8 +139,8 @@ During the scan, each IP is printed with a ? or ? along with a status
 message:
 
 ``` text
-? 23.209.22.214   -> clean (TLS handshake OK)
-? 1.2.3.4         -> failed (TCP connect failed)
+✅ 23.209.22.214   -> clean (TLS handshake OK)
+❌ 1.2.3.4         -> failed (TCP connect failed)
 ```
 After completion, a summary is displayed and the clean IPs are written
 to text files:
