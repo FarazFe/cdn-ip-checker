@@ -6,10 +6,10 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-DEFAULT_TIMEOUT = 7
+DEFAULT_TIMEOUT = 5
 DEFAULT_PORT = 443
-DEFAULT_WORKERS = 100
-RETRIES = 2
+DEFAULT_WORKERS = 10
+RETRIES = 3
 
 
 # ----------------------------------------------------------------------
@@ -28,7 +28,7 @@ def tls_handshake(sock: socket.socket, sni: str | None, timeout: int):
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
-    context.set_alpn_protocols(['h2', 'http/1.1'])
+    context.set_alpn_protocols(['http/1.1'])
 
     try:
         sock.settimeout(timeout)

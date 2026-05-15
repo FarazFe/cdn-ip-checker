@@ -142,7 +142,7 @@ CDN CIDR ranges -> generate ips.txt -> run cdn_ip_checker.py
 
 ## How It Works
 
-The script performs a two?step test for each IP address:
+The script performs a two-step test for each IP address:
 
 1. **TCP connection** to port 443 - verifies the IP is reachable.
 2. **TLS handshake**:
@@ -160,10 +160,10 @@ IPs to be scanned in seconds.
 
 ## Features
 
-- **Dual?mode scanning** - run purely domainless tests (empty SNI) or
+- **Dual-mode scanning** - run purely domainless tests (empty SNI) or
   combine them with classic domain fronting checks.
-- **No external dependencies** - uses only Python?s standard library.
-- **Configurable concurrency and timeout** - fine?tune for your network
+- **No external dependencies** - uses only Python's standard library.
+- **Configurable concurrency and timeout** - fine-tune for your network
   conditions.
 - **Automatic output files** - clean IPs saved as plain text, ready for
   import into your circumvention tools.
@@ -173,7 +173,7 @@ IPs to be scanned in seconds.
 ## Requirements
 
 - Python **3.6** or newer
-- No third?party packages required
+- No third-party packages required
 
 Tested on Linux and macOS.
 
@@ -213,16 +213,16 @@ Advanced options
 ``` text
 -f, --file       Path to IP list file (required)
 --sni            SNI hostname (omit for domainless only)
--t, --timeout    Per?test timeout in seconds (default: 7)
--w, --workers    Number of parallel threads (default: 100)
+-t, --timeout    Per-test timeout in seconds (Default 5)
+-w, --workers    Number of parallel threads (Default 10)
 ```
 Example with custom timeout and more workers:
 
 ``` bash
-python cdn_ip_checker.py -f akamai_ips.txt --sni example.com -t 3 -w 50
+python cdn_ip_checker.py -f akamai_ips.txt --sni example.com -t 3 -w 100
 ```
 ## Output
-During the scan, each IP is printed with a ? or ? along with a status
+During the scan, each IP is printed with a ✅ or ❌ along with a status
 message:
 
 ``` text
@@ -252,7 +252,7 @@ Direct protocol - after the TLS tunnel is established, the
 application can run its own protocol (e.g., obfuscated SSH, custom
 proxy) without sending an HTTP request.
 
-This method is often called ?domainless fronting? and can bypass network
+This method is often called *domainless fronting* and can bypass network
 filters that inspect the SNI field, because the initial handshake reveals
 no target domain.
 
@@ -260,7 +260,7 @@ no target domain.
 Pre-filtering IP lists for censorship circumvention tools that support
 domainless fronting or empty SNI configurations.
 
-Identifying CDN edge nodes that can act as relay points when SNI?based
+Identifying CDN edge nodes that can act as relay points when SNI-based
 blocking is active.
 
 Bulk testing of large IP ranges to find working endpoints before
