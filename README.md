@@ -10,7 +10,7 @@ be used for TLS-based circumvention or tunneling.
 ## Quickstart
 
 ```bash
-# Clone the repository (or download ip_checker.py directly)
+# Clone the repository (or download cdn_ip_checker.py directly)
 git clone https://github.com/FarazFe/cdn-ip-checker.git
 cd cdn-ip-scanner
 ```
@@ -43,12 +43,12 @@ Clean IPs are saved to clean_domainless.txt and printed on screen
 
 #### Full fronting test with an SNI:
 ``` bash
-python ip_checker.py -f ips.txt --sni a248.e.akamai.net
+python cdn_ip_checker.py -f ips.txt --sni a248.e.akamai.net
 ```
 Adjust concurrency and timeout as needed:
 
 ```bash
-python ip_checker.py -f ips.txt -w 50 -t 3
+python cdn_ip_checker.py -f ips.txt -w 50 -t 3
 ```
 ---
 
@@ -195,7 +195,7 @@ are treated as comments and ignored.
 
 ### Domainless scan (empty SNI)
 ``` bash
-python ip_checker.py -f ips.txt
+python cdn_ip_checker.py -f ips.txt
 ```
 Tests each IP without any SNI. Clean IPs are saved to clean_domainless.txt.
 
@@ -205,7 +205,7 @@ fronting), use the --sni flag. The script then tests both fronting
 and domainless modes for every IP:
 
 ``` bash
-python ip_checker.py -f ips.txt --sni a248.e.akamai.net
+python cdn_ip_checker.py -f ips.txt --sni a248.e.akamai.net
 ```
 Results are split into clean_fronting.txt and clean_domainless.txt.
 
@@ -213,13 +213,13 @@ Advanced options
 ``` text
 -f, --file       Path to IP list file (required)
 --sni            SNI hostname (omit for domainless only)
--t, --timeout    Per?test timeout in seconds (default: 5)
--w, --workers    Number of parallel threads (default: 20)
+-t, --timeout    Per?test timeout in seconds (default: 7)
+-w, --workers    Number of parallel threads (default: 100)
 ```
 Example with custom timeout and more workers:
 
 ``` bash
-python ip_checker.py -f akamai_ips.txt --sni example.com -t 3 -w 50
+python cdn_ip_checker.py -f akamai_ips.txt --sni example.com -t 3 -w 50
 ```
 ## Output
 During the scan, each IP is printed with a ? or ? along with a status

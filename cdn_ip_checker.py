@@ -80,7 +80,7 @@ def test_fronting(ip: str, sni: str, timeout: int) -> dict:
         request = (
             f"GET / HTTP/1.1\r\n"
             f"Host: {sni}\r\n"
-            "User-Agent: Mozilla/5.0 (Shiro Checker)\r\n"
+            "User-Agent: Mozilla/5.0\r\n"
             "Connection: close\r\n\r\n"
         ).encode()
 
