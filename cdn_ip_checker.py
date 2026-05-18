@@ -1,4 +1,38 @@
 #!/usr/bin/env python3
+"""
+CDN IP Checker
+
+Goal:
+    Find CDN edge IP candidates that may work with Shirokhorshid-style usage.
+
+Modes:
+    fast:
+        Fast compatibility scan.
+
+        Without --sni:
+            profile = empty-sni
+            Tests:
+                - TCP connect
+                - Python/OpenSSL TLS with no SNI
+
+        With --sni:
+            profile = sni-fronting
+            Tests:
+                - TCP connect
+                - Python/OpenSSL TLS with SNI
+                - HTTP/1.1 request with Host header
+
+    full:
+        Reserved for future real tunnel verification.
+        For now, it runs FAST checks and marks mode=full.
+
+Outputs:
+    results.txt
+    results.jsonl
+"""
+
+from __future__ import annotations
+
 import argparse
 import json
 import socket
@@ -11,12 +45,27 @@ from pathlib import Path
 DEFAULT_TIMEOUT = 10
 DEFAULT_PORT = 443
 DEFAULT_WORKERS = 10
-DEFAULT_ATTEMPTS = 3
+DEFAULT_ATTEMPTS = 1
 
 
-# ----------------------------------------------------------------------
-# Result model
-# ----------------------------------------------------------------------
+# ============================================================
+# Result models
+# ============================================================
+
+@dataclass
+class ProbeResult:
+    name: str
+    success: int
+    attempts: int
+    last_error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.success > 0
+
+    def ratio(self) -> str:
+        return f"{self.success}/{self.attempts}"
+
 
 @dataclass
 class ScanResult:
@@ -24,22 +73,12 @@ class ScanResult:
     mode: str
     profile: str
     sni: str
-
     tcp_ok: bool
-    tcp_success: int
-    tcp_attempts: int
-
+    tcp: str
     tls_openssl: str
-    tls_openssl_success: int
-    tls_openssl_attempts: int
-
     http_fronting: str
-    http_fronting_success: int
-    http_fronting_attempts: int
-
     tls_go: str
     tls_utls_chrome: str
-
     score_passed: int
     score_total: int
     status: str
@@ -57,7 +96,7 @@ class ScanResult:
 
         parts.extend([
             f"tcp_ok={str(self.tcp_ok).lower()}",
-            f"tcp={self.tcp_success}/{self.tcp_attempts}",
+            f"tcp={self.tcp}",
             f"tls_openssl={self.tls_openssl}",
             f"http_fronting={self.http_fronting}",
             f"tls_go={self.tls_go}",
@@ -69,387 +108,635 @@ class ScanResult:
         if self.error:
             parts.append(f"error={self.error}")
 
-        return "  ".join(parts)
+        return " ".join(parts)
 
 
-# ----------------------------------------------------------------------
-# Low-level test helpers
-# ----------------------------------------------------------------------
+# ============================================================
+# Input handling
+# ============================================================
 
-def tcp_connect(ip: str, timeout: int) -> socket.socket | None:
+def load_ips(path: str) -> list[str]:
+    ip_file = Path(path)
+
+    if not ip_file.exists():
+        print(f"[!] IP file not found: {path}")
+        sys.exit(1)
+
+    ips: list[str] = []
+
+    with ip_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+
+            if not line:
+                continue
+
+            if line.startswith("#"):
+                continue
+
+            ips.append(line)
+
+    return ips
+
+
+# ============================================================
+# Low-level network functions
+# ============================================================
+
+def tcp_connect(ip: str, timeout: int, port: int = DEFAULT_PORT) -> socket.socket | None:
     try:
-        return socket.create_connection((ip, DEFAULT_PORT), timeout=timeout)
-    except (socket.timeout, OSError):
+        sock = socket.create_connection((ip, port), timeout=timeout)
+        return sock
+    except Exception:
         return None
 
 
-def tls_handshake(sock: socket.socket, sni: str | None, timeout: int):
+def tls_handshake(
+        sock: socket.socket,
+        server_hostname: str | None,
+        timeout: int,
+) -> tuple[ssl.SSLSocket | None, dict]:
     """
-    Perform a Python/OpenSSL TLS handshake over an already-connected TCP socket.
+    Run Python/OpenSSL TLS handshake.
 
-    For now we keep the TLS profile intentionally simple and close to your current
-    debugging setup:
-      - certificate verification disabled
-      - hostname verification disabled
-      - TLS 1.2 forced
-      - no ALPN advertised
-
-    Later we can make TLS version and ALPN configurable.
+    Important:
+        - Certificate verification is disabled.
+        - Hostname checking is disabled.
+        - TLS is currently forced to TLS 1.2 to preserve the current project behavior.
+        - server_hostname=None means empty-SNI behavior.
     """
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.maximum_version = ssl.TLSVersion.TLSv1_2
-    # context.set_alpn_protocols(["http/1.1"])
+
+    info = {
+        "tls_version": None,
+        "cipher": None,
+        "alpn": None,
+        "error_type": None,
+        "error": None,
+    }
 
     try:
-        sock.settimeout(timeout)
-        tls_sock = context.wrap_socket(sock, server_hostname=sni)
+        context = ssl.create_default_context()
 
-        info = {
-            "ok": True,
-            "sni": sni,
-            "alpn": tls_sock.selected_alpn_protocol(),
-            "version": tls_sock.version(),
-            "cipher": tls_sock.cipher(),
-            "error_type": None,
-            "error": None,
-        }
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+
+        # Preserve current scanner behavior.
+        # Later we can make this configurable:
+        #   --tls-version auto
+        #   --tls-version 1.2
+        #   --tls-version 1.3
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_2
+
+        # Do not advertise ALPN yet.
+        # We are intentionally keeping the Python probe simple.
+        # Later Go/uTLS probes can test more realistic ClientHello fingerprints.
+        # context.set_alpn_protocols(["http/1.1"])
+
+        sock.settimeout(timeout)
+
+        tls_sock = context.wrap_socket(
+            sock,
+            server_hostname=server_hostname,
+        )
+
+        info["tls_version"] = tls_sock.version()
+        info["cipher"] = tls_sock.cipher()
+        info["alpn"] = tls_sock.selected_alpn_protocol()
+
         return tls_sock, info
 
     except Exception as e:
-        info = {
-            "ok": False,
-            "sni": sni,
-            "alpn": None,
-            "version": None,
-            "cipher": None,
-            "error_type": type(e).__name__,
-            "error": repr(e),
-        }
+        info["error_type"] = type(e).__name__
+        info["error"] = str(e)
+
+        try:
+            sock.close()
+        except Exception:
+            pass
+
         return None, info
 
 
-# ----------------------------------------------------------------------
-# Shared scoring / formatting helpers
-# ----------------------------------------------------------------------
+# ============================================================
+# Probe helpers
+# ============================================================
 
-def bool_count_string(success: int, attempts: int) -> str:
-    if attempts == 0:
-        return "skipped"
-
-    return f"{success}/{attempts}"
-
-
-def format_probe_error(prefix: str, info: dict) -> str:
-    error_type = info.get("error_type")
-    error = info.get("error")
-
-    if not error_type and not error:
-        return ""
-
-    return f"{prefix}: {error_type}: {error}"
-
-
-def close_socket_quietly(sock) -> None:
-    try:
-        if sock:
-            sock.close()
-    except Exception:
-        pass
-
-
-def status_for_empty_sni(
-    tcp_success: int,
-    tcp_attempts: int,
-    tls_success: int,
-    tls_attempts: int,
-) -> str:
-    if tcp_success == 0:
-        return "bad"
-
-    if tls_success == 0:
-        return "maybe"
-
-    if tcp_success == tcp_attempts and tls_attempts > 0 and tls_success == tls_attempts:
-        return "strong"
-
-    return "candidate"
-
-
-def status_for_sni_fronting(
-    tcp_success: int,
-    tcp_attempts: int,
-    tls_success: int,
-    tls_attempts: int,
-    http_success: int,
-    http_attempts: int,
-) -> str:
-    if tcp_success == 0:
-        return "bad"
-
-    if tls_success == 0:
-        return "maybe"
-
-    if http_success == 0:
-        return "candidate"
-
-    if (
-        tcp_success == tcp_attempts
-        and tls_attempts > 0
-        and tls_success == tls_attempts
-        and http_attempts > 0
-        and http_success == http_attempts
-    ):
-        return "strong"
-
-    return "candidate"
-
-
-# ----------------------------------------------------------------------
-# FAST mode profiles
-# ----------------------------------------------------------------------
-
-def test_fast_empty_sni(ip: str, timeout: int, attempts: int) -> ScanResult:
-    """
-    FAST profile: empty-sni
-
-    This is used when the user does NOT provide --sni.
-    It matches the Shirokhorshid setup where users only enter CDN edge IPs.
-    """
-    tcp_success = 0
-    tls_success = 0
-    tls_attempts = 0
+def probe_tcp(ip: str, timeout: int, attempts: int) -> ProbeResult:
+    success = 0
     last_error = ""
 
     for _ in range(attempts):
         sock = tcp_connect(ip, timeout)
 
-        if not sock:
+        if sock:
+            success += 1
+            try:
+                sock.close()
+            except Exception:
+                pass
+        else:
             last_error = "TCP failed"
-            continue
 
-        tcp_success += 1
-        tls_attempts += 1
-        tls_sock, info = tls_handshake(sock, None, timeout)
-
-        if tls_sock:
-            tls_success += 1
-            close_socket_quietly(tls_sock)
-            continue
-
-        close_socket_quietly(sock)
-        last_error = format_probe_error("TLS empty-SNI failed", info)
-
-    score_passed = 1 if tls_success > 0 else 0
-    score_total = 1
-    tcp_ok = tcp_success > 0
-
-    return ScanResult(
-        ip=ip,
-        mode="fast",
-        profile="empty-sni",
-        sni="",
-        tcp_ok=tcp_ok,
-        tcp_success=tcp_success,
-        tcp_attempts=attempts,
-        tls_openssl=bool_count_string(tls_success, tls_attempts),
-        tls_openssl_success=tls_success,
-        tls_openssl_attempts=tls_attempts,
-        http_fronting="skipped",
-        http_fronting_success=0,
-        http_fronting_attempts=0,
-        tls_go="skipped",
-        tls_utls_chrome="skipped",
-        score_passed=score_passed,
-        score_total=score_total,
-        status=status_for_empty_sni(tcp_success, attempts, tls_success, tls_attempts),
-        error="" if tls_success > 0 else last_error,
+    return ProbeResult(
+        name="tcp",
+        success=success,
+        attempts=attempts,
+        last_error=last_error,
     )
 
 
-def test_fast_sni_fronting(ip: str, sni: str, timeout: int, attempts: int) -> ScanResult:
-    """
-    FAST profile: sni-fronting
-
-    This is used when the user provides --sni.
-    It tests TLS with that SNI and then sends a basic HTTP/1.1 request with Host: sni.
-    """
-    tcp_success = 0
-    tls_success = 0
-    tls_attempts = 0
-    http_success = 0
-    http_attempts = 0
+def probe_tls_openssl(
+        ip: str,
+        timeout: int,
+        attempts: int,
+        sni: str | None = None,
+) -> ProbeResult:
+    success = 0
     last_error = ""
 
     for _ in range(attempts):
         sock = tcp_connect(ip, timeout)
 
         if not sock:
-            last_error = "TCP failed"
+            last_error = "TCP failed before TLS"
             continue
 
-        tcp_success += 1
-        tls_attempts += 1
+        tls_sock, info = tls_handshake(sock, sni, timeout)
+
+        if tls_sock:
+            success += 1
+            try:
+                tls_sock.close()
+            except Exception:
+                pass
+        else:
+            error_type = info.get("error_type", "unknown")
+            error = info.get("error", "unknown")
+            last_error = f"{error_type}: {error}"
+
+    return ProbeResult(
+        name="tls_openssl",
+        success=success,
+        attempts=attempts,
+        last_error=last_error,
+    )
+
+
+def probe_http_fronting(
+        ip: str,
+        timeout: int,
+        attempts: int,
+        sni: str,
+) -> ProbeResult:
+    success = 0
+    last_error = ""
+
+    for _ in range(attempts):
+        sock = tcp_connect(ip, timeout)
+
+        if not sock:
+            last_error = "TCP failed before HTTP fronting"
+            continue
+
         tls_sock, info = tls_handshake(sock, sni, timeout)
 
         if not tls_sock:
-            close_socket_quietly(sock)
-            last_error = format_probe_error(f"TLS with SNI {sni} failed", info)
+            error_type = info.get("error_type", "unknown")
+            error = info.get("error", "unknown")
+            last_error = f"TLS failed before HTTP fronting: {error_type}: {error}"
             continue
-
-        tls_success += 1
-        http_attempts += 1
 
         request = (
             f"GET / HTTP/1.1\r\n"
             f"Host: {sni}\r\n"
             "User-Agent: Mozilla/5.0\r\n"
-            "Connection: close\r\n\r\n"
+            "Connection: close\r\n"
+            "\r\n"
         ).encode()
 
         try:
             tls_sock.settimeout(timeout)
             tls_sock.sendall(request)
+
             response = tls_sock.recv(1024).decode(errors="ignore")
 
             if response.strip().startswith("HTTP/"):
-                http_success += 1
+                success += 1
             else:
-                last_error = "TLS succeeded, but response did not start with HTTP/"
+                last_error = "Response did not start with HTTP/"
 
         except Exception as e:
-            last_error = f"HTTP fronting failed: {type(e).__name__}: {repr(e)}"
+            last_error = f"{type(e).__name__}: {repr(e)}"
 
         finally:
-            close_socket_quietly(tls_sock)
+            try:
+                tls_sock.close()
+            except Exception:
+                pass
 
-    score_passed = 0
-    if tls_success > 0:
-        score_passed += 1
-    if http_success > 0:
-        score_passed += 1
+    return ProbeResult(
+        name="http_fronting",
+        success=success,
+        attempts=attempts,
+        last_error=last_error,
+    )
 
-    score_total = 2
-    tcp_ok = tcp_success > 0
+
+def skipped_probe(name: str) -> ProbeResult:
+    return ProbeResult(
+        name=name,
+        success=0,
+        attempts=0,
+        last_error="skipped",
+    )
+
+
+# ============================================================
+# Policy helpers
+# ============================================================
+
+def probe_value(probe: ProbeResult) -> str:
+    if probe.attempts == 0:
+        return "skipped"
+
+    return probe.ratio()
+
+
+def status_from_score(tcp_ok: bool, score_passed: int) -> str:
+    if not tcp_ok:
+        return "bad"
+
+    if score_passed == 0:
+        return "maybe"
+
+    if score_passed == 1:
+        return "candidate"
+
+    return "strong"
+
+
+# ============================================================
+# FAST profile implementations
+# ============================================================
+
+def test_fast_empty_sni(
+        ip: str,
+        timeout: int,
+        attempts: int,
+        mode: str = "fast",
+) -> ScanResult:
+    """
+    FAST empty-SNI profile.
+
+    Meaning:
+        User did not provide --sni.
+
+    Tests:
+        - TCP
+        - Python/OpenSSL TLS with server_hostname=None
+
+    Policy:
+        TCP failed              => bad
+        TCP ok, TLS failed      => maybe
+        TCP ok, TLS succeeded   => candidate
+
+    Later:
+        Go/uTLS probes can raise candidate to strong.
+    """
+
+    tcp = probe_tcp(ip, timeout, attempts)
+
+    if not tcp.ok:
+        return ScanResult(
+            ip=ip,
+            mode=mode,
+            profile="empty-sni",
+            sni="",
+            tcp_ok=False,
+            tcp=probe_value(tcp),
+            tls_openssl="skipped",
+            http_fronting="skipped",
+            tls_go="skipped",
+            tls_utls_chrome="skipped",
+            score_passed=0,
+            score_total=1,
+            status="bad",
+            error=tcp.last_error,
+        )
+
+    tls_openssl = probe_tls_openssl(
+        ip=ip,
+        timeout=timeout,
+        attempts=attempts,
+        sni=None,
+    )
+
+    score_passed = 1 if tls_openssl.ok else 0
+    score_total = 1
 
     return ScanResult(
         ip=ip,
-        mode="fast",
-        profile="sni-fronting",
-        sni=sni,
-        tcp_ok=tcp_ok,
-        tcp_success=tcp_success,
-        tcp_attempts=attempts,
-        tls_openssl=bool_count_string(tls_success, tls_attempts),
-        tls_openssl_success=tls_success,
-        tls_openssl_attempts=tls_attempts,
-        http_fronting=bool_count_string(http_success, http_attempts),
-        http_fronting_success=http_success,
-        http_fronting_attempts=http_attempts,
+        mode=mode,
+        profile="empty-sni",
+        sni="",
+        tcp_ok=True,
+        tcp=probe_value(tcp),
+        tls_openssl=probe_value(tls_openssl),
+        http_fronting="skipped",
         tls_go="skipped",
         tls_utls_chrome="skipped",
         score_passed=score_passed,
         score_total=score_total,
-        status=status_for_sni_fronting(
-            tcp_success,
-            attempts,
-            tls_success,
-            tls_attempts,
-            http_success,
-            http_attempts,
-        ),
-        error="" if http_success > 0 else last_error,
+        status=status_from_score(True, score_passed),
+        error="" if tls_openssl.ok else tls_openssl.last_error,
     )
 
 
-def test_fast(ip: str, timeout: int, attempts: int, sni: str | None = None) -> ScanResult:
+def test_fast_sni_fronting(
+        ip: str,
+        sni: str,
+        timeout: int,
+        attempts: int,
+        mode: str = "fast",
+) -> ScanResult:
+    """
+    FAST SNI/fronting profile.
+
+    Meaning:
+        User provided --sni.
+
+    Tests:
+        - TCP
+        - Python/OpenSSL TLS with server_hostname=sni
+        - HTTP/1.1 GET / with Host: sni
+
+    Policy:
+        TCP failed                    => bad
+        TCP ok, TLS failed            => maybe
+        TCP ok, TLS ok, HTTP failed   => candidate
+        TCP ok, TLS ok, HTTP ok       => strong
+    """
+
+    tcp = probe_tcp(ip, timeout, attempts)
+
+    if not tcp.ok:
+        return ScanResult(
+            ip=ip,
+            mode=mode,
+            profile="sni-fronting",
+            sni=sni,
+            tcp_ok=False,
+            tcp=probe_value(tcp),
+            tls_openssl="skipped",
+            http_fronting="skipped",
+            tls_go="skipped",
+            tls_utls_chrome="skipped",
+            score_passed=0,
+            score_total=2,
+            status="bad",
+            error=tcp.last_error,
+        )
+
+    tls_openssl = probe_tls_openssl(
+        ip=ip,
+        timeout=timeout,
+        attempts=attempts,
+        sni=sni,
+    )
+
+    http_fronting = probe_http_fronting(
+        ip=ip,
+        timeout=timeout,
+        attempts=attempts,
+        sni=sni,
+    )
+
+    score_passed = 0
+
+    if tls_openssl.ok:
+        score_passed += 1
+
+    if http_fronting.ok:
+        score_passed += 1
+
+    score_total = 2
+
+    error = ""
+
+    if not tls_openssl.ok:
+        error = tls_openssl.last_error
+    elif not http_fronting.ok:
+        error = http_fronting.last_error
+
+    return ScanResult(
+        ip=ip,
+        mode=mode,
+        profile="sni-fronting",
+        sni=sni,
+        tcp_ok=True,
+        tcp=probe_value(tcp),
+        tls_openssl=probe_value(tls_openssl),
+        http_fronting=probe_value(http_fronting),
+        tls_go="skipped",
+        tls_utls_chrome="skipped",
+        score_passed=score_passed,
+        score_total=score_total,
+        status=status_from_score(True, score_passed),
+        error=error,
+    )
+
+
+def test_fast(
+        ip: str,
+        timeout: int,
+        attempts: int,
+        sni: str | None = None,
+        mode: str = "fast",
+) -> ScanResult:
     if sni:
-        return test_fast_sni_fronting(ip, sni, timeout, attempts)
+        return test_fast_sni_fronting(
+            ip=ip,
+            sni=sni,
+            timeout=timeout,
+            attempts=attempts,
+            mode=mode,
+        )
 
-    return test_fast_empty_sni(ip, timeout, attempts)
+    return test_fast_empty_sni(
+        ip=ip,
+        timeout=timeout,
+        attempts=attempts,
+        mode=mode,
+    )
 
 
-# ----------------------------------------------------------------------
+# ============================================================
 # Output helpers
-# ----------------------------------------------------------------------
+# ============================================================
 
 def save_results(results: list[ScanResult]) -> None:
-    with open("results.txt", "w") as f:
+    with open("results.txt", "w", encoding="utf-8") as f:
         for result in results:
             f.write(result.to_text_line() + "\n")
 
-    with open("results.jsonl", "w") as f:
+    with open("results.jsonl", "w", encoding="utf-8") as f:
         for result in results:
             f.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
 
-    print(f"[*] Saved {len(results)} results to results.txt")
-    print(f"[*] Saved {len(results)} results to results.jsonl")
+    usable_results = [
+        result
+        for result in results
+        if result.status in {"strong", "candidate", "maybe"}
+    ]
+
+    status_rank = {
+        "strong": 0,
+        "candidate": 1,
+        "maybe": 2,
+        "bad": 3,
+    }
+
+    usable_results.sort(
+        key=lambda result: (
+            status_rank.get(result.status, 99),
+            result.ip,
+        )
+    )
+
+    with open("candidate_ips.txt", "w", encoding="utf-8") as f:
+        for result in usable_results:
+            f.write(result.ip + "\n")
+
+    print(f"[*] Saved {len(results)} detailed results to results.txt")
+    print(f"[*] Saved {len(results)} machine-readable results to results.jsonl")
+    print(f"[*] Saved {len(usable_results)} candidate IPs to candidate_ips.txt")
 
 
-def print_result(result: ScanResult) -> None:
-    if result.status == "bad":
-        icon = "❌"
-    elif result.status == "maybe":
-        icon = "⚠️"
-    elif result.status == "candidate":
-        icon = "🟡"
-    else:
-        icon = "✅"
+def status_icon(status: str) -> str:
+    if status == "bad":
+        return "❌"
 
-    print(f"{icon} {result.to_text_line()}")
+    if status == "maybe":
+        return "⚠️"
+
+    if status == "candidate":
+        return "✅"
+
+    if status == "strong":
+        return "🔥"
+
+    if status == "confirmed":
+        return "🏆"
+
+    return "•"
 
 
-# ----------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------
+# ============================================================
+# CLI
+# ============================================================
 
-def main():
-    parser = argparse.ArgumentParser(description="Shirokhorshid CDN Edge IP Checker")
-    parser.add_argument("-f", "--file", required=True, help="File with IPs")
-    parser.add_argument("--sni", default=None, help="SNI hostname; enables sni-fronting profile")
-    parser.add_argument("--mode", choices=["fast", "full"], default="fast", help="Scan mode: fast or full")
-    parser.add_argument("--attempts", type=int, default=DEFAULT_ATTEMPTS, help="Attempts per IP")
-    parser.add_argument("-t", "--timeout", type=int, default=DEFAULT_TIMEOUT)
-    parser.add_argument("-w", "--workers", type=int, default=DEFAULT_WORKERS)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="CDN edge IP checker for Shirokhorshid-style compatibility testing."
+    )
+
+    parser.add_argument(
+        "-f",
+        "--file",
+        default="ips.txt",
+        help="Input file containing IPs, one per line. Default: ips.txt",
+    )
+
+    parser.add_argument(
+        "-w",
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Number of concurrent workers. Default: {DEFAULT_WORKERS}",
+    )
+
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help=f"Timeout in seconds. Default: {DEFAULT_TIMEOUT}",
+    )
+
+    parser.add_argument(
+        "--attempts",
+        type=int,
+        default=DEFAULT_ATTEMPTS,
+        help=f"Number of attempts per probe. Default: {DEFAULT_ATTEMPTS}",
+    )
+
+    parser.add_argument(
+        "--mode",
+        choices=["fast", "full"],
+        default="fast",
+        help="Scan mode: fast or full. FULL is a placeholder for future tunnel verification.",
+    )
+
+    parser.add_argument(
+        "--sni",
+        default=None,
+        help="Optional SNI hostname. If provided, scanner uses the sni-fronting profile.",
+    )
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
 
+    if args.workers < 1:
+        print("[!] --workers must be at least 1")
+        sys.exit(1)
+
+    if args.timeout < 1:
+        print("[!] --timeout must be at least 1 second")
+        sys.exit(1)
+
     if args.attempts < 1:
-        print("Error: --attempts must be at least 1")
+        print("[!] --attempts must be at least 1")
         sys.exit(1)
 
-    ip_path = Path(args.file)
-    if not ip_path.is_file():
-        print(f"Error: {args.file} not found")
-        sys.exit(1)
-
-    with open(ip_path, "r") as f:
-        ips = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+    ips = load_ips(args.file)
 
     if not ips:
-        print("No IPs to test.")
-        sys.exit(0)
+        print("[!] No IPs found in input file.")
+        sys.exit(1)
 
-    print(
-        f"[*] Testing {len(ips)} IPs with "
-        f"{args.workers} workers and {args.attempts} attempts per IP..."
-    )
+    profile = "sni-fronting" if args.sni else "empty-sni"
+
+    print(f"[*] Loaded {len(ips)} IPs from {args.file}")
+    print(f"[*] Mode: {args.mode}")
+    print(f"[*] Profile: {profile}")
+    print(f"[*] Workers: {args.workers}")
+    print(f"[*] Timeout: {args.timeout}s")
+    print(f"[*] Attempts: {args.attempts}")
+
+    if args.sni:
+        print(f"[*] SNI: {args.sni}")
 
     if args.mode == "full":
         print("[!] FULL mode tunnel verification is not implemented yet.")
-        print("[!] Running FAST checks only for now.")
+        print("[!] Running FAST checks only and marking mode=full.")
 
-    if args.sni:
-        print(f"[*] FAST profile: sni-fronting | sni={args.sni}")
-    else:
-        print("[*] FAST profile: empty-sni")
-
-    scan_results: list[ScanResult] = []
+    results: list[ScanResult] = []
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         future_to_ip = {
-            executor.submit(test_fast, ip, args.timeout, args.attempts, args.sni): ip
+            executor.submit(
+                test_fast,
+                ip,
+                args.timeout,
+                args.attempts,
+                args.sni,
+                args.mode,
+            ): ip
             for ip in ips
         }
 
@@ -458,12 +745,15 @@ def main():
 
             try:
                 result = future.result()
-                scan_results.append(result)
-                print_result(result)
+                results.append(result)
+
+                print(f"{status_icon(result.status)} {result.to_text_line()}")
+
             except Exception as e:
                 print(f"❌ {ip} error={type(e).__name__}: {repr(e)}")
 
-    save_results(scan_results)
+    results.sort(key=lambda r: r.ip)
+    save_results(results)
 
 
 if __name__ == "__main__":

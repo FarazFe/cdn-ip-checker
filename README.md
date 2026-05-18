@@ -80,9 +80,12 @@ python cdn_ip_checker.py -f ips.txt --sni example.com --attempts 3
 Results are saved to:
 
 ```text
+candidate_ips.txt
 results.txt
 results.jsonl
 ```
+
+For most users, `candidate_ips.txt` is the main file to copy from. It contains only IPs, one per line.
 
 ---
 
@@ -254,7 +257,7 @@ The checker uses these statuses:
 | Status | Meaning |
 |---|---|
 | `bad` | TCP failed. The IP is not useful for this scan. |
-| `maybe` | TCP worked, but the TLS/fronting check did not succeed. Do not treat this as a final rejection for Shirokhorshid-style use cases. |
+| `maybe` | TCP worked, but the TLS/fronting check did not succeed. Do not treat this as a final rejection for CDN-edge client use cases. |
 | `candidate` | At least one higher-level check succeeded, but not all attempts were stable. |
 | `strong` | All required checks for the selected profile succeeded across all attempts. |
 
@@ -273,14 +276,25 @@ prove that the IP cannot work in the final client.
 
 ## Output
 
-The checker writes two output files:
+The checker writes three output files:
 
 ```text
+candidate_ips.txt
 results.txt
 results.jsonl
 ```
 
-`results.txt` is human-readable:
+`candidate_ips.txt` is the main user-ready output. It contains only IPs, one per line, sorted best-to-worst so users can copy the list into their client:
+
+```text
+5.6.7.8
+1.2.3.4
+8.8.8.8
+```
+
+It includes `strong`, `candidate`, and `maybe` results, and excludes `bad` results. `maybe` results are kept because TCP worked, and a Python/OpenSSL TLS failure is not always a final rejection.
+
+`results.txt` is detailed human-readable debug output:
 
 ```text
 185.200.232.40  mode=fast  profile=empty-sni  tcp_ok=true  tcp=3/3  tls_openssl=0/3  http_fronting=skipped  tls_go=skipped  tls_utls_chrome=skipped  score=0/1  status=maybe  error=TLS empty-SNI failed: ConnectionResetError: ConnectionResetError(104, 'Connection reset by peer')
@@ -290,8 +304,7 @@ results.jsonl
 future filtering, ranking, or importing into other tools.
 
 The checker no longer writes separate `clean_domainless.txt` or
-`clean_fronting.txt` files. A single result file is easier to understand and
-keeps all information together.
+`clean_fronting.txt` files. The user-ready IP list is now `candidate_ips.txt`, while detailed scan information stays in `results.txt` and `results.jsonl`.
 
 ---
 

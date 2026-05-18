@@ -76,9 +76,12 @@ python cdn_ip_checker.py -f ips.txt --sni example.com --attempts 3
 نتیجه‌ها در این فایل‌ها ذخیره می‌شوند:
 
 ```text
+candidate_ips.txt
 results.txt
 results.jsonl
 ```
+
+برای بیشتر کاربران، فایل اصلی برای کپی کردن IPها `candidate_ips.txt` است. این فایل فقط IPها را، هرکدام در یک خط، ذخیره می‌کند.
 
 ---
 
@@ -244,7 +247,7 @@ Connection: close
 | وضعیت | معنی |
 |---|---|
 | `bad` | TCP شکست خورده است. این IP برای این اسکن مفید نیست. |
-| `maybe` | TCP کار کرده، اما تست TLS/fronting موفق نشده است. برای سناریوهایی مثل Shirokhorshid، این را حذف قطعی در نظر نگیرید. |
+| `maybe` | TCP کار کرده، اما تست TLS/fronting موفق نشده است. برای سناریوهای کلاینت‌های CDN Edge، این را حذف قطعی در نظر نگیرید. |
 | `candidate` | حداقل یکی از تست‌های سطح بالاتر موفق شده، اما نتیجه در همه تلاش‌ها پایدار نبوده است. |
 | `strong` | همه تست‌های لازم برای پروفایل انتخاب‌شده، در همه تلاش‌ها موفق بوده‌اند. |
 
@@ -261,14 +264,25 @@ TCP worked but TLS failed -> maybe
 
 ## خروجی
 
-ابزار دو فایل خروجی می‌سازد:
+ابزار سه فایل خروجی می‌سازد:
 
 ```text
+candidate_ips.txt
 results.txt
 results.jsonl
 ```
 
-`results.txt` برای خواندن توسط انسان است:
+`candidate_ips.txt` خروجی اصلی و آماده‌ی استفاده برای کاربر است. این فایل فقط IPها را، هرکدام در یک خط، ذخیره می‌کند و آن‌ها را از بهتر به ضعیف‌تر مرتب می‌کند تا بتوانید راحت داخل کلاینت خودتان کپی کنید:
+
+```text
+5.6.7.8
+1.2.3.4
+8.8.8.8
+```
+
+این فایل نتیجه‌های `strong`، `candidate` و `maybe` را نگه می‌دارد و `bad`ها را حذف می‌کند. دلیل نگه داشتن `maybe` این است که TCP کار کرده، و شکست TLS با Python/OpenSSL همیشه به معنی حذف قطعی IP نیست.
+
+`results.txt` خروجی کامل‌تر و مناسب بررسی/debug است:
 
 ```text
 185.200.232.40  mode=fast  profile=empty-sni  tcp_ok=true  tcp=3/3  tls_openssl=0/3  http_fronting=skipped  tls_go=skipped  tls_utls_chrome=skipped  score=0/1  status=maybe  error=TLS empty-SNI failed: ConnectionResetError: ConnectionResetError(104, 'Connection reset by peer')
@@ -283,7 +297,7 @@ clean_domainless.txt
 clean_fronting.txt
 ```
 
-دلیلش ساده است: یک فایل نتیجه واحد، هم کمتر گیج‌کننده است و هم اطلاعات کامل‌تری را کنار هم نگه می‌دارد.
+فایل آماده‌ی کپی کردن IPها حالا `candidate_ips.txt` است، و جزئیات کامل اسکن در `results.txt` و `results.jsonl` باقی می‌ماند.
 
 ---
 
